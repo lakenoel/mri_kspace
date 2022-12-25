@@ -3,7 +3,7 @@ code adapted from
 https://github.com/farazahmeds/Classification-of-brain-tumor-using-Spatiotemporal-models/blob/main/dataset/datasets.py
 """
 import os
-import multiprocessing
+#import multiprocessing
 from pathlib import Path
 import numpy as np
 import torchio as tio
@@ -23,13 +23,12 @@ from tqdm import tqdm
 #import argparse
 import torch.nn.functional as F
 
-#metric = AUROC()
 
-N_SAMPLES = 50 #1160
+N_SAMPLES = 98 #1160
 TRAIN_SPLIT_RATIO = 0.8
 NUM_EPOCHS = 2
-NUM_WORKERS = 5
-BATCH_SIZE = 2
+NUM_WORKERS = 4
+BATCH_SIZE = 1
 SEED = 42
 
 # gbm T1 r.t. T1GD; no-test-transform[augmentation]
@@ -67,27 +66,17 @@ def train(model, criterion, loader, optimizer, device, results):
     count = 0
     total_acc, total_loss = 0, 0
     progress = tqdm(loader)
-    print('Train')
     for i, batch in enumerate(progress):
-         data = batch['t1'][tio.DATA]
-        print('data type:', data.dtype)
-        data = data.type(torch.LongTensor)
-        data = data.to(device)
-        labels = batch['label']
-        print('labels type:', labels.dtype)
-        labels = labels.type(torch.LongTensor)
-        labels = labels.to(device)
+        data = batch['t1'][tio.DATA].type(torch.FloatTensor).to(device)
+        labels = batch['label'].to(device)
         outputs = model(data) # without converting to float: RuntimeError: Input type (torch.cuda.ShortTensor) and weight type (torch.cuda.FloatTensor) should be the same
-        print('outputs type:', outputs.dtype)
-    
+        
         loss = criterion(outputs, labels)
-        print('loss type:', loss.dtype)
         #log_softmax = F.log_softmax(outputs, dim=1)
         #loss = F.nll_loss(log_softmax, labels)
         total_loss += loss.item() * data.size(0)
 
         preds = torch.argmax(outputs.data, 1)
-        print('preds type:', preds.dtype)
         total_acc += torch.sum(preds == labels).item()
     
         count += data.size(0)
@@ -99,11 +88,7 @@ def train(model, criterion, loader, optimizer, device, results):
         progress.set_description('train loss: %.3f | train acc: %.3f' % (total_loss / count, total_acc / count))
 
     print('\tTrain | loss: %.3f, acc: %.3f' % (total_loss / count, total_acc / count))
-    # print('loss: %.3f | acc: %.3f' % (total_loss / count, total_acc / count))
-    # print('\t\ttrain--total_loss/count:', total_loss / count)
-    # print('\t\ttrain--total_loss/len(loader):', total_loss / len(loader))
-    # print('\t\ttrain--total_acc/count:', total_acc / count)
-    # print('\t\ttrain--total_acc/len(loader):', total_acc / len(loader))
+
     results['train_loss']=f'{(total_loss / count):.3f}'
     results['train_acc']=f'{(total_acc / count):.3f}'
 
@@ -112,27 +97,17 @@ def test(model, criterion, loader, metric, device, predlist, lbllist, results):
     total_acc, total_loss = 0, 0
 
     progress = tqdm(loader)
-    print('Test')
     for i, batch in enumerate(progress):
-        data = batch['t1'][tio.DATA]
-        print('data type:', data.dtype)
-        data = data.type(torch.LongTensor)
-        data = data.to(device)
-        labels = batch['label']
-        print('labels type:', labels.dtype)
-        labels = labels.type(torch.LongTensor)
-        labels = labels.to(device)
+        data = batch['t1'][tio.DATA].type(torch.FloatTensor).to(device)
+        labels = batch['label'].to(device)
         outputs = model(data) # without converting to float: RuntimeError: Input type (torch.cuda.ShortTensor) and weight type (torch.cuda.FloatTensor) should be the same
-        print('outputs type:', outputs.dtype)
-    
+        
         loss = criterion(outputs, labels)
-        print('loss type:', loss.dtype)
         #log_softmax = F.log_softmax(outputs, dim=1)
         #loss = F.nll_loss(log_softmax, labels)
         total_loss += loss.item() * data.size(0)
 
         preds = torch.argmax(outputs.data, 1)
-        print('preds type:', preds.dtype)
         total_acc += torch.sum(preds == labels).item()
     
         count += data.size(0)
@@ -143,16 +118,12 @@ def test(model, criterion, loader, metric, device, predlist, lbllist, results):
 
     auroc = metric(predlist, lbllist)
     print('\t Test | loss: %.3f, acc: %.3f, auc: %.3f' % (total_loss / count, total_acc / count, auroc.item()))
-    # print('\t\ttest--total_loss/count:', total_loss / count)
-    # print('\t\ttest--total_loss/len(loader):', total_loss / len(loader))
-    # print('\t\ttest--total_acc/count:', total_acc / count)
-    # print('\t\ttest--total_acc/len(loader):', total_acc / len(loader))
+
     results['test_loss'] = f'{(total_loss / count):.3f}'
     results['test_acc']=f'{(total_acc / count):.3f}'
     results['test_auc']=f'{auroc.item():.3f}'
 
 def run_epoch(epoch, model, criterion, trainloader, testloader, optimizer, metric, device):
-#for epoch in range(NUM_EPOCHS):
     results = {}
     # results = {'train_loss': [],
     #             'train_acc': [],
@@ -167,116 +138,14 @@ def run_epoch(epoch, model, criterion, trainloader, testloader, optimizer, metri
     test(model, criterion, testloader, metric, device, predlist, lbllist, results)
     write_results(results, epoch)
 
-    # count = 0
-    # total_acc, total_loss = 0, 0
-    # #total_correct, total_images = 0, 0
-
-    # progress = tqdm(loader)
-    # for i, batch in enumerate(progress):
-    #     data = batch['t1'][tio.DATA].to(device)
-    #     labels = batch['label'].to(device)
-    #     outputs = model(data.float()) # without converting to float: RuntimeError: Input type (torch.cuda.ShortTensor) and weight type (torch.cuda.FloatTensor) should be the same
-        
-    #     loss = criterion(outputs, labels)
-    #     total_loss += loss.item() * data.size(0)
-
-    #     preds = torch.argmax(outputs.data, 1)
-    #     total_acc += torch.sum(preds == labels).item()
-    
-    #     count += data.size(0)
-
-    #     if optimizer is not None:
-    #         optimizer.zero_grad()
-    #         loss.backward()
-    #         optimizer.step()
-    #     else:
-    #         predlist = torch.cat([predlist, preds.view(-1)])  # Append batch prediction results; for AUC
-    #         lbllist = torch.cat([lbllist, labels.view(-1)])
-    #     progress.set_description('loss: %.3f | acc: %.3f' % (total_loss / count, total_acc / count))
-
-    #     #total_images += labels.size(0)
-    #     #correct = (preds == labels).sum().item()
-
-    #     #total_correct += correct
-    #     #print('Running total correct:', total_correct)
-    # if optimizer is not None:
-    #     print('\tTrain | loss: %.3f, acc: %.3f' % (total_loss / count, total_acc / count))
-    #     # print('loss: %.3f | acc: %.3f' % (total_loss / count, total_acc / count))
-    #     # print('train--total_loss/count:', total_loss / count)
-    #     # print('train--total_loss/len(loader):', total_loss / len(loader))
-    #     # print('train--total_acc/count:', total_acc / count)
-    #     # print('train--total_acc/len(loader):', total_acc / len(loader))
-    #     results['train_loss'].append(f'{(total_loss / count):.3f}')
-    #     results['train_acc'].append(f'{(total_acc / count):.3f}')
-    #     #results['train_auc'].append(auroc.item())
-    # else:
-    #     auroc = metric(predlist, lbllist)
-    #     print('\t Test | loss: %.3f, acc: %.3f, auc: %.3f' % (total_loss / count, total_acc / count, auroc.item()))
-    #     # print('test--total_loss/count:', total_loss / count)
-    #     # print('test--total_loss/len(loader):', total_loss / len(loader))
-    #     # print('test--total_acc/count:', total_acc / count)
-    #     # print('test--total_acc/len(loader):', total_acc / len(loader))
-    #     results['test_loss'].append(f'{(total_loss / count):.3f}')
-    #     results['test_acc'].append(f'{(total_acc / count):.3f}')
-    #     results['test_auc'].append(f'{auroc.item():.3f}')
-
-    #     write_results(results, epoch)
-
 
 def write_results(results, epoch):
     with open(RESULTS_FILE, 'a') as f:
         res = str(epoch)+','+','.join(results.values())
         f.write(res+'\n')
 
-        # for epoch_results in zip(*results.values()):
-        #     res = ','.join(epoch_results[i] for i in range(len(results.keys())))
-        #     print('res:', str(epoch)+','+res)
-        #     f.write(str(epoch)+','+res+'\n')
-        # f.flush()
-
-    # print(f'Epoch [{epoch+1}/{NUM_EPOCHS}], '
-    #       f'Step [{i+1}/{len(trainloader)}], '
-    #       f'Loss: {(total_loss/total_images):.4f}, '
-    #       f'Accuracy: {(total_correct/total_images)*100:.2f}%')
-    
-    # model.eval()
-    # with torch.inference_mode():
-    #     correct, total = 0, 0
-    #     total_loss = 0
-
-    #     for batch in testloader:
-    #         data = batch['t1'][tio.DATA].to(device)
-    #         labels = batch['label'].to(device)
-
-    #         outputs = model(data.float()) # without converting to float: RuntimeError: Input type (torch.cuda.ShortTensor) and weight type (torch.cuda.FloatTensor) should be the same 
-
-    #         loss = criterion(outputs, labels)
-    #         total_loss += loss.item()
-
-    #         preds = torch.argmax(outputs.data, 1)
-
-    #         total += labels.size(0)
-    #         correct += (preds == labels).sum().item()
-    #         #acc = correct / total
-    #     print(f'Model\'s test accuracy: {100 * correct / total}%')
 
 def main():
-    # parser = argparse.ArgumentParser()
-    # parser.add_argument('--seed', default=42, type=int, help='an integer to set the seed')
-    # parser.add_argument('--n_samples', default=200, type=int, help='number of images to use')
-    # parser.add_argument('-e', '--n_epochs', default=100, type=int, help='number of epochs')
-    # parser.add_argument('--train_split', default=0.8, type=float, help='ratio (number between 0 and 1) of total number of samples to use for training. rest will be used for testing')
-    # parser.add_argument('-b', '--batch_size', default=2, type=int, help='batch size')
-    # #parser.add_argument('-r', '--results', default='train_results.csv', type=str, help='file to save the results (loss, accuracy, and AUC) to')
-
-    # args = parser.parse_args()
-
-    # N_SAMPLES = args.n_samples
-    # TRAIN_SPLIT_RATIO = args.train_split
-    # NUM_EPOCHS = args.n_epochs
-    # BATCH_SIZE = args.batch_size
-    # SEED = args.seed
-
     torch.manual_seed(SEED)
     gbm = get_gbm()  # 611 samples
     ixi = get_ixi()  # 581 samples
@@ -300,14 +169,11 @@ def main():
         Compose,
     )
 
-    #num_workers = multiprocessing.cpu_count()
-
     rescale = RescaleIntensity((0.05, 99.5))
     randaffine = tio.RandomAffine(scales=(0.9,1.2),degrees=10, isotropic=True, image_interpolation='nearest')
     flip = tio.RandomFlip(axes=('LR'), p=0.5)
     #pad = CropOrPad([256,256,150])
     pad = CropOrPad([240,240,155])
-    #transforms = [pad]
     train_transform = Compose([rescale, flip, randaffine, pad])
     test_transform = Compose([pad])
 
@@ -344,19 +210,6 @@ def main():
     trainloader = DataLoader(dataset=trainset, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS)
     testloader = DataLoader(dataset=testset, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS)
 
-    # samples_per_dataset = N_SAMPLES // 2
-
-    # subjects_list = gbm[:samples_per_dataset] + ixi[:samples_per_dataset]
-    # subjects_dataset = tio.SubjectsDataset(subjects_list, transform=transform)
-
-    # trainset, testset = random_split(subjects_dataset, [n_train, n_test], generator=torch.Generator().manual_seed(SEED))
-    
-    # trainloader = DataLoader(dataset=trainset,  batch_size=BATCH_SIZE, shuffle=True)
-    # testloader = DataLoader(dataset=testset,   batch_size=BATCH_SIZE, shuffle=False)
-
-    # print('Training set:', len(trainset), 'subjects')
-    # print('Testing set:', len(testset), 'subjects')
-
 
     # # Visualize axial slices of one batch
     # layer = 100
@@ -381,15 +234,14 @@ def main():
     in_channels = 1 # model input channels (1|3)
     sample_size = 240*240*155  # image size
 
-    model = generate_model.main(cnn_name, model_depth, n_classes, in_channels, sample_size)
+    model = generate_model.main(cnn_name, model_depth, n_classes, in_channels, sample_size).to(device)
     #model = UNet().to(device)
     model.to(device)
     
     optimizer = torch.optim.AdamW(model.parameters())#, lr=1e-3, weight_decay=1e-3)
     criterion = nn.CrossEntropyLoss()
     #criterion = F.nll_loss()
-    metric = BinaryAUROC()
-    metric.to(device)
+    metric = BinaryAUROC().to(device)
 
 
     # results = {'train_loss': [],
@@ -400,28 +252,16 @@ def main():
 
     header = ['epoch','train_loss','train_acc','test_loss','test_acc','test_auc']
     with open(RESULTS_FILE, 'w') as f:
-        #heading = ','.join(results.keys())
-        #f.write('epoch,' + heading + '\n')
         f.write(','.join(header)+'\n')
 
     for epoch in range(NUM_EPOCHS):
-        # predlist = torch.zeros(0, dtype=torch.long).to(device)
-        # lbllist = torch.zeros(0, dtype=torch.long).to(device)
+        predlist = torch.zeros(0, dtype=torch.float).to(device)
+        lbllist = torch.zeros(0, dtype=torch.float).to(device)
         print('epoch %d:' % epoch)
-        # model.train()
-        # run_epoch(epoch, model, criterion, trainloader, optimizer, None, device)
-        # model.eval()
-        # with torch.inference_mode():
-        #     run_epoch(epoch, model, criterion, testloader, None, metric, device, predlist, lbllist)
         run_epoch(epoch, model, criterion, trainloader, testloader, optimizer, metric, device)
 
     #torch.save(model.state_dict(), f'{}.pth')
-    # with open(results_file, 'a') as f:
-    #     epoch = 0
-    #     for epoch_results in zip(*results.values()):
-    #         res = ','.join(epoch_results[i] for i in range(len(results.keys())))
-    #         f.write(str(epoch)+','+res+'\n')
-    #         epoch += 1
+
 
 if __name__ == '__main__':
     main()
