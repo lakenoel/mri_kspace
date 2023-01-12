@@ -5,7 +5,7 @@ and
 https://github.com/farazahmeds/Classification-of-brain-tumor-using-Spatiotemporal-models/blob/main/train.py
 """
 import os
-import multiprocessing
+#import multiprocessing
 from pathlib import Path
 import numpy as np
 import torchio as tio
@@ -22,44 +22,86 @@ import convert_kspace
 from torchmetrics.classification import BinaryAUROC
 #from torchmetrics import AUROC
 from tqdm import tqdm
+import yaml
 
-REDUCED_PERCENTAGE = 30
+YAML_FILE = 'config.yaml'
+with open(YAML_FILE) as f:
+    parameters = yaml.safe_load(f)
 
-N_SAMPLES = 100
-TRAIN_SPLIT_RATIO = 0.8
-NUM_EPOCHS = 100
-BATCH_SIZE = 3
-SEED = 42
+REDUCED_DIR = Path(parameters['REDUCED_DIR'])
+REDUCED_PERCENTAGE = parameters['REDUCED_PERCENTAGE']
+N_SAMPLES = parameters['N_SAMPLES']
+TRAIN_SPLIT_RATIO = parameters['TRAIN_SPLIT_RATIO']
+NUM_EPOCHS = parameters['NUM_EPOCHS']
+NUM_WORKERS = parameters['NUM_WORKERS']
+BATCH_SIZE = parameters['BATCH_SIZE']
+SEED = parameters['SEED']
+IXI_IMAGE_TYPE = parameters['IXI_IMAGE_TYPE']
+GBM_IMAGE_TYPE = parameters['GBM_IMAGE_TYPE']
+DATA_ROOT_DIR = parameters['DATA_ROOT_DIR']
 
-RESULTS_FILE = f'train_reduced_mri_results_{REDUCED_PERCENTAGE}-prcnt-scan_{N_SAMPLES}-samples_{NUM_EPOCHS}-epochs_T1vT1_unstripped.csv'
+# REDUCED_PERCENTAGE = 30
 
-IXI_DIR = Path('./IXI/T1')  # T1, T2 (can also download MRA, PD, and DTI)
-GBM_DIR = Path('./UPennGBM/images_structural_unstripped/')  # T1, T1GD, FLAIR, T2
+# N_SAMPLES = 100
+# TRAIN_SPLIT_RATIO = 0.8
+# NUM_EPOCHS = 30
+# NUM_WORKERS = 4
+# BATCH_SIZE = 2
+# SEED = 42
+
+RESULTS_FILE = Path(f'train_reduced_mri_results_{REDUCED_PERCENTAGE}-prcnt-scan_{N_SAMPLES}-samples_{NUM_EPOCHS}-epochs_{IXI_IMAGE_TYPE}v{GBM_IMAGE_TYPE}_unstripped.csv')
+
+# IXI_IMAGE_TYPE = 'T2'
+# GBM_IMAGE_TYPE = 'T2'
+
+IXI_DIR = Path(os.path.join(DATA_ROOT_DIR, f'IXI/{IXI_IMAGE_TYPE}'))  # T1, T2 (can also download MRA, PD, and DTI)
+GBM_DIR = Path(os.path.join(DATA_ROOT_DIR, 'UPennGBM/images_structural_unstripped/'))  # T1, T1GD, FLAIR, T2
 
 def get_ixi():
     ixi = []  # healthy samples
 
-    for dirpath, dirnames, filenames in sorted(os.walk(IXI_DIR)):  # os.walk(os.path.join(IXI_DIR, 'T1'))
+    for dirpath, dirnames, filenames in tqdm(sorted(os.walk(REDUCED_DIR))):  # os.walk(os.path.join(IXI_DIR, 'T1'))
         for file in filenames:
-            if file.endswith('-T1.nii.gz'):
+            if file.endswith(f'-{IXI_IMAGE_TYPE}_reduced.nii.gz'):
                 img_path = os.path.join(dirpath, file)
-                reduced_image = convert_kspace.get_reduced_scan(img_path, REDUCED_PERCENTAGE)
-                reduced_image = np.expand_dims(reduced_image, axis=0)  # adding dimension (=1)
-                ixi.append(tio.Subject(t1=tio.ScalarImage(tensor=reduced_image), label=0,))
+                ixi.append(tio.Subject(image=tio.ScalarImage(img_path), label=0,))
     return ixi
 
 def get_gbm():
     gbm = []  # glioblastoma samples
 
-    for dirpath, dirnames, filenames in sorted(os.walk(GBM_DIR)):
+    for dirpath, dirnames, filenames in tqdm(sorted(os.walk(GBM_DIR))):
         for file in filenames:
             # exclude post op follow up scans
-            if '_21_' not in file and file.endswith('_T1_unstripped.nii.gz'):
+            if '_21_' not in file and file.endswith(f'_{GBM_IMAGE_TYPE}_unstripped_reduced.nii.gz'):
                 img_path = os.path.join(dirpath, file)
-                reduced_image = convert_kspace.get_reduced_scan(img_path, REDUCED_PERCENTAGE)
-                reduced_image = np.expand_dims(reduced_image, axis=0)  # adding dimension (=1)
-                gbm.append(tio.Subject(t1=tio.ScalarImage(tensor=reduced_image), label=1,))#tio.ScalarImage(img_path), label=1,))
+                gbm.append(tio.Subject(image=tio.ScalarImage(img_path), label=1,))#tio.ScalarImage(img_path), label=1,))
     return gbm
+
+# def get_ixi():
+#     ixi = []  # healthy samples
+
+#     for dirpath, dirnames, filenames in tqdm(sorted(os.walk(IXI_DIR))):  # os.walk(os.path.join(IXI_DIR, 'T1'))
+#         for file in filenames:
+#             if file.endswith(f'-{IXI_IMAGE_TYPE}.nii.gz'):
+#                 img_path = os.path.join(dirpath, file)
+#                 reduced_image = convert_kspace.get_reduced_scan(img_path, REDUCED_PERCENTAGE)
+#                 reduced_image = np.expand_dims(reduced_image, axis=0)  # adding dimension (=1)
+#                 ixi.append(tio.Subject(image=tio.ScalarImage(tensor=reduced_image), label=0,))
+#     return ixi
+
+# def get_gbm():
+#     gbm = []  # glioblastoma samples
+
+#     for dirpath, dirnames, filenames in tqdm(sorted(os.walk(GBM_DIR))):
+#         for file in filenames:
+#             # exclude post op follow up scans
+#             if '_21_' not in file and file.endswith(f'_{GBM_IMAGE_TYPE}_unstripped.nii.gz'):
+#                 img_path = os.path.join(dirpath, file)
+#                 reduced_image = convert_kspace.get_reduced_scan(img_path, REDUCED_PERCENTAGE)
+#                 reduced_image = np.expand_dims(reduced_image, axis=0)  # adding dimension (=1)
+#                 gbm.append(tio.Subject(image=tio.ScalarImage(tensor=reduced_image), label=1,))#tio.ScalarImage(img_path), label=1,))
+#     return gbm
 
 #gbm_subjects_dataset = tio.SubjectsDataset(gbm, transform=transform)
 #ixi_subjects_dataset = tio.SubjectsDataset(ixi, transform=transform)
@@ -70,9 +112,10 @@ def train(model, criterion, loader, optimizer, device, results):
     total_acc, total_loss = 0, 0
     progress = tqdm(loader)
     for i, batch in enumerate(progress):
-        data = batch['t1'][tio.DATA].to(device)
+        data = batch['image'][tio.DATA].type(torch.FloatTensor).to(device)
         labels = batch['label'].to(device)
-        outputs = model(data.float()) # without converting to float: RuntimeError: Input type (torch.cuda.ShortTensor) and weight type (torch.cuda.FloatTensor) should be the same
+
+        outputs = model(data) # without converting to float: RuntimeError: Input type (torch.cuda.ShortTensor) and weight type (torch.cuda.FloatTensor) should be the same
         
         loss = criterion(outputs, labels)
         total_loss += loss.item() * data.size(0)
@@ -103,9 +146,9 @@ def test(model, criterion, loader, metric, device, predlist, lbllist, results):
 
     progress = tqdm(loader)
     for i, batch in enumerate(progress):
-        data = batch['t1'][tio.DATA].to(device)
+        data = batch['image'][tio.DATA].type(torch.FloatTensor).to(device)
         labels = batch['label'].to(device)
-        outputs = model(data.float()) # without converting to float: RuntimeError: Input type (torch.cuda.ShortTensor) and weight type (torch.cuda.FloatTensor) should be the same
+        outputs = model(data) # without converting to float: RuntimeError: Input type (torch.cuda.ShortTensor) and weight type (torch.cuda.FloatTensor) should be the same
         
         loss = criterion(outputs, labels)
         total_loss += loss.item() * data.size(0)
@@ -239,12 +282,28 @@ def write_results(results, epoch):
     #     print(f'Model\'s test accuracy: {100 * correct / total}%')
 
 def main():
+    if not os.path.exists(IXI_DIR):
+        print('path does not exist:', IXI_DIR)
+    if not os.path.exists(GBM_DIR):
+        print('path does not exist:', GBM_DIR)
+    assert(os.path.exists(IXI_DIR))
+    assert(os.path.exists(GBM_DIR))
+
+    assert(IXI_IMAGE_TYPE in ['T1', 'T2'])
+    assert(GBM_IMAGE_TYPE in ['T1', 'T2', 'FLAIR', 'T1GD'])
+
+
     torch.manual_seed(SEED)
+    print(f'Getting {REDUCED_PERCENTAGE}% reduced UPennGBM scans...')
     gbm = get_gbm()  # 611 samples
+
+    print(f'Getting {REDUCED_PERCENTAGE}% reduced IXI scans...')
     ixi = get_ixi()  # 581 samples
 
-    print('Total samples in UPennGBM dataset:', len(gbm))
+    print('\nTotal samples in UPennGBM dataset:', len(gbm))
     print('Total samples in IXI dataset:', len(ixi))
+    print()
+    print('Total samples requested:', N_SAMPLES)
     print()
 
     n_train = int(N_SAMPLES * TRAIN_SPLIT_RATIO)
@@ -269,7 +328,7 @@ def main():
     pad = CropOrPad([240,240,155])
     #transforms = [pad]
     train_transform = Compose([rescale, flip, randaffine, pad])
-    test_transform = Compose([pad])
+    test_transform = Compose([rescale, pad])
 
     samples_per_dataset = N_SAMPLES // 2
 
@@ -301,9 +360,12 @@ def main():
     print('Testing set:', len(testset), 'samples')
     count_split(testset)
 
-    trainloader = DataLoader(dataset=trainset, batch_size=BATCH_SIZE, shuffle=True,)# num_workers=num_workers)
-    testloader = DataLoader(dataset=testset, batch_size=BATCH_SIZE, shuffle=False,)# num_workers=num_workers)
+    trainloader = DataLoader(dataset=trainset, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS)
+    testloader = DataLoader(dataset=testset, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS)
 
+    print('batch size:', BATCH_SIZE)
+    print('length trainloader:', len(trainloader))
+    print('length testloader:', len(testloader), '\n')
 
     # samples_per_dataset = N_SAMPLES // 2
 
@@ -348,8 +410,7 @@ def main():
     
     optimizer = torch.optim.AdamW(model.parameters())#, lr=1e-3, weight_decay=1e-3)
     criterion = nn.CrossEntropyLoss()
-    metric = BinaryAUROC()
-    metric.to(device)
+    metric = BinaryAUROC().to(device)
 
 
     # results = {'train_loss': [],
@@ -365,8 +426,6 @@ def main():
         f.write(','.join(header)+'\n')
 
     for epoch in range(NUM_EPOCHS):
-        # predlist = torch.zeros(0, dtype=torch.long).to(device)
-        # lbllist = torch.zeros(0, dtype=torch.long).to(device)
         print('epoch %d:' % epoch)
         # model.train()
         # run_epoch(epoch, model, criterion, trainloader, optimizer, None, device)
