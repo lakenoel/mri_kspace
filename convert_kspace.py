@@ -9,11 +9,11 @@ import nibabel as ni
 try:
     import mkl_fft as m
 
-    fft2 = m.fft2
-    ifft2 = m.ifft2
+    fftn = m.fftn
+    ifftn = m.ifftn
 except (ModuleNotFoundError, ImportError):
-    fft2 = np.fft.fft2
-    ifft2 = np.fft.ifft2
+    fftn = np.fft.fftn
+    ifftn = np.fft.ifftn
 finally:
     fftshift = np.fft.fftshift
     ifftshift = np.fft.ifftshift
@@ -28,7 +28,7 @@ def convert_2_kspace(img):
             img (np.ndarray): The NumPy ndarray to be transformed
             out (np.ndarray): Array to store output (must be same shape as img)
         """
-        return fftshift(fft2(ifftshift(img)))
+        return fftshift(fftn(ifftshift(img)))
     
     # 2. Prepare kspace display - get magnitude then scale and normalise
     # K-space scaling: https://homepages.inf.ed.ac.uk/rbf/HIPR2/pixlog.htm
@@ -44,7 +44,7 @@ def convert_2_image(kspace):
         kspace (np.ndarray): Complex kspace ndarray
         out (np.ndarray): Array to store values
     """
-    return np.absolute(fftshift(ifft2(ifftshift(kspace))))
+    return np.absolute(fftshift(ifftn(ifftshift(kspace))))
 
 def reduced_scan_percentage(kspace: np.ndarray, percentage: float):
     """Deletes a percentage of lines from the kspace in phase direction
@@ -93,43 +93,18 @@ def get_display(img, kspace, kscale=-3):
 
 def get_reduced_scan(img_path, REDUCED_PERCENTAGE):
     img = ni.load(img_path).get_fdata()
-    n_layers = img.shape[-1]
+    #n_layers = img.shape[-1]
     # convert each layer in the image to k-space
     
-    kspace_layers = [convert_2_kspace(img[:,:,layer]) for layer in range(n_layers)]
-    reduced_kspace = [reduced_scan_percentage(kspace_layer, REDUCED_PERCENTAGE) for kspace_layer in kspace_layers]
+    #kspace_layers = [convert_2_kspace(img[:,:,layer]) for layer in range(n_layers)]
+    #reduced_kspace = [reduced_scan_percentage(kspace_layer, REDUCED_PERCENTAGE) for kspace_layer in kspace_layers]
 
-    reduced_image_layers = [convert_2_image(reduced_kspace_layer) for reduced_kspace_layer in reduced_kspace]
+    #reduced_image_layers = [convert_2_image(reduced_kspace_layer) for reduced_kspace_layer in reduced_kspace]
 
+    reduced_kspace = np.absolute(convert_2_kspace(img))
+    return reduced_kspace
     #reduced_kspace = np.absolute(np.stack(reduced_kspace, axis=-1))
     #return reduced_kspace
 
     reduced_image = np.absolute(np.stack(reduced_image_layers, axis=-1))
     return reduced_image
-
-# def plot_layer(LAYER, REDUCED_PERCENTAGE=30):
-#     fig, ax = plt.subplots(2,2)
-
-#     T1_kspace = reduced_scan_percentage(T1_kspace_layers[LAYER].copy(), REDUCED_PERCENTAGE)
-#     T1_reduced_kspace = reduced_scan_percentage(T1_kspace_layers[LAYER].copy(), REDUCED_PERCENTAGE)
-#     T1_reduced_image = convert_2_image(T1_reduced_kspace)
-#     T2_kspace = reduced_scan_percentage(T2_kspace_layers[LAYER].copy(), REDUCED_PERCENTAGE)
-#     T2_reduced_kspace = reduced_scan_percentage(T2_kspace_layers[LAYER].copy(), REDUCED_PERCENTAGE)
-#     T2_reduced_image = convert_2_image(T2_reduced_kspace)
-
-#     T1_img_arr, T1_ksp_arr = get_display(T1_image_layers[LAYER], T1_kspace_layers[LAYER])
-#     ax[0,0].imshow(T1_img_arr, cmap='gray')
-#     ax[0,1].imshow(T1_ksp_arr, cmap='gray')
-
-#     # reduced_img_arr, reduced_ksp_arr = get_display(reduced_image, reduced_kspace)
-#     # ax[1,0].imshow(reduced_img_arr, cmap='gray')
-#     # ax[1,1].imshow(reduced_ksp_arr, cmap='gray')
-
-#     T2_img_arr, T2_ksp_arr = get_display(T2_image_layers[LAYER], T2_kspace_layers[LAYER])
-#     ax[1,0].imshow(T2_img_arr, cmap='gray')
-#     ax[1,1].imshow(T2_ksp_arr, cmap='gray')
-
-#     axis_off(ax[0,0], ax[0,1], ax[1,0], ax[1,1]);
-
-
-# plot_layer(LAYER)
