@@ -1,322 +1,294 @@
-"""
-code adapted from
-https://github.com/farazahmeds/Classification-of-brain-tumor-using-Spatiotemporal-models/blob/main/dataset/datasets.py
-"""
 import os
-#import multiprocessing
-from pathlib import Path
-import numpy as np
+import pandas as pd
 import torchio as tio
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, random_split
-#import torchvision
-#from unet import UNet
 import sys
-sys.path.append('../3D_CNN_PyTorch')
+sys.path.append('../../3D_CNN_PyTorch')
 import generate_model
 #import convert_kspace
 from torchmetrics.classification import BinaryAUROC
 #from torchmetrics import AUROC
 from tqdm import tqdm
-#import argparse
-#import torch.nn.functional as F
-import yaml
+import pydicom
+import glob
+import numpy as np
 
-YAML_FILE = 'config.yaml'
-with open(YAML_FILE) as f:
-    parameters = yaml.safe_load(f)
+TRAIN_SPLIT_RATIO = 0.8
+NUM_WORKERS = 4
+BATCH_SIZE = 4
+SEED = 42
+NUM_EPOCHS = 50
+RESULTS_FILE = f'CNvAD_train_results_{NUM_EPOCHS}-epochs_{BATCH_SIZE}-batch-size.csv'
 
-N_SAMPLES = parameters['N_SAMPLES']
-TRAIN_SPLIT_RATIO = parameters['TRAIN_SPLIT_RATIO']
-NUM_EPOCHS = parameters['NUM_EPOCHS']
-NUM_WORKERS = parameters['NUM_WORKERS']
-BATCH_SIZE = parameters['BATCH_SIZE']
-SEED = parameters['SEED']
-IXI_IMAGE_TYPE = parameters['IXI_IMAGE_TYPE']
-GBM_IMAGE_TYPE = parameters['GBM_IMAGE_TYPE']
-DATA_ROOT_DIR = parameters['DATA_ROOT_DIR']
-# N_SAMPLES = 100
-# TRAIN_SPLIT_RATIO = 0.8
-# NUM_EPOCHS = 30
-# NUM_WORKERS = 4
-# BATCH_SIZE = 2
-# SEED = 42
+BASE_DIR = './data'
 
-# IXI_IMAGE_TYPE = 'T2'
-# GBM_IMAGE_TYPE = 'T2'
+nc_mci_ad_csv = os.path.join(BASE_DIR, 'CSV', 'NCvMCIvAD.csv')
+nc_mci_ad_df = pd.read_csv(nc_mci_ad_csv)
+nc_mci_ad_df = nc_mci_ad_df.drop_duplicates()
 
 
-# gbm T1 r.t. T1GD; no-test-transform[augmentation]
-RESULTS_FILE = f'train_results_{N_SAMPLES}-samples_{NUM_EPOCHS}-epochs_{IXI_IMAGE_TYPE}v{GBM_IMAGE_TYPE}_unstripped.csv'
+def set_loc(df):
+    def get_loc(row):
+        return os.path.join(BASE_DIR, 'MRI', row.PTID)
 
-IXI_DIR = Path(os.path.join(DATA_ROOT_DIR, f'IXI/{IXI_IMAGE_TYPE}'))  # T1, T2 (can also download MRA, PD, and DTI)
-GBM_DIR = Path(os.path.join(DATA_ROOT_DIR, 'UPennGBM/images_structural_unstripped/'))  # T1, T1GD, FLAIR, T2
+    location = df.apply(get_loc, axis=1)
+    df['loc'] = location
 
-def get_ixi():
-    ixi = []  # healthy samples
-
-    for dirpath, dirnames, filenames in sorted(os.walk(IXI_DIR)):  # os.walk(os.path.join(IXI_DIR, 'T1'))
-        for file in filenames:
-            if file.endswith(F'-{IXI_IMAGE_TYPE}.nii.gz'):
-                img_path = os.path.join(dirpath, file)
-                #subject_dict = {f'{IXI_IMAGE_TYPE.lower()}': tio.ScalarImage(img_path), 'label': 0}
-                #subject = tio.Subject(subject_dict)
-                #ixi.append(subject)
-
-                ixi.append(tio.Subject(image=tio.ScalarImage(img_path), label=0,))
-    return ixi
-
-def get_gbm():
-    gbm = []  # glioblastoma samples
-
-    for dirpath, dirnames, filenames in sorted(os.walk(GBM_DIR)):
-        for file in filenames:
-            # exclude post op follow up scans
-            if '_21_' not in file and file.endswith(f'_{GBM_IMAGE_TYPE}_unstripped.nii.gz'):
-                img_path = os.path.join(dirpath, file)
-                #subject_dict = {f'{GBM_IMAGE_TYPE.lower()}': tio.ScalarImage(img_path), 'label': 1}
-                #subject = tio.Subject(subject_dict)
-                #gbm.append(subject)
-    
-                gbm.append(tio.Subject(image=tio.ScalarImage(img_path), label=1,))
-    return gbm
-
-#gbm_subjects_dataset = tio.SubjectsDataset(gbm, transform=transform)
-#ixi_subjects_dataset = tio.SubjectsDataset(ixi, transform=transform)
+set_loc(nc_mci_ad_df)
 
 
-def train(model, criterion, loader, optimizer, device, results):
-    count = 0
-    total_acc, total_loss = 0, 0
-    progress = tqdm(loader)
+def get_subjects(dx_0, dx_1):
+    assert dx_0 in ('CN', 'MCI')
+    assert dx_1 in ('MCI', 'AD')
 
-    for i, batch in enumerate(progress):
-        data = batch['image'][tio.DATA].type(torch.FloatTensor).to(device)
-        labels = batch['label'].to(device)
+    subjects = []
 
-        #print(f'\tdata min is {data.min()}, data max is {data.max()}')
+    for _, row in nc_mci_ad_df.iterrows():
+        if dx_0 == 'CN' and dx_1 == 'MCI':
+            dx = dx_0 if row.DX_bl == 0 else dx_1
+        elif dx_0 == 'CN' and dx_1 == 'AD':
+            dx = dx_0 if row.DX_bl == 0 else dx_1
+        elif dx_0 == 'MCI' and dx_1 == 'AD':
+            dx = dx_0 if row.DX_bl == 1 else dx_1
+        label = 0 if dx == dx_0 else 1
 
-        outputs = model(data) # without converting to float: RuntimeError: Input type (torch.cuda.ShortTensor) and weight type (torch.cuda.FloatTensor) should be the same
-        
-        loss = criterion(outputs, labels)
-        #log_softmax = F.log_softmax(outputs, dim=1)
-        #loss = F.nll_loss(log_softmax, labels)
-        total_loss += loss.item() * data.size(0)
+        img_path = os.path.join(row['loc'], 't2')
 
-        preds = torch.argmax(outputs.data, 1)
-        total_acc += torch.sum(preds == labels).item()
-    
-        count += data.size(0)
+        # skip files with no SliceLocation (eg scout views)
+        slices = []
+        skipcount = 0
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        
-        progress.set_description('train loss: %.3f | train acc: %.3f' % (total_loss / count, total_acc / count))
+        files = []
+        for fname in glob.glob(os.path.join(img_path, '*'), recursive=False):
+        #     #print("loading: {}".format(fname))
+             files.append(pydicom.dcmread(fname))
 
-    print('\tTrain | loss: %.3f, acc: %.3f' % (total_loss / count, total_acc / count))
-    # print('loss: %.3f | acc: %.3f' % (total_loss / count, total_acc / count))
-    # print('\t\ttrain--total_loss/count:', total_loss / count)
-    # print('\t\ttrain--total_loss/len(loader):', total_loss / len(loader))
-    # print('\t\ttrain--total_acc/count:', total_acc / count)
-    # print('\t\ttrain--total_acc/len(loader):', total_acc / len(loader))
-    results['train_loss']=f'{(total_loss / count):.3f}'
-    results['train_acc']=f'{(total_acc / count):.3f}'
+        for f in files:
+            if hasattr(f, 'SliceLocation'):
+                slices.append(f)
+            else:
+                skipcount = skipcount + 1
 
-def test(model, criterion, loader, metric, device, predlist, lbllist, results):
-    count = 0
-    total_acc, total_loss = 0, 0
-    progress = tqdm(loader)
+        #print("skipped, no SliceLocation: {}".format(skipcount))
 
-    for i, batch in enumerate(progress):
-        data = batch['image'][tio.DATA].type(torch.FloatTensor).to(device)
-        labels = batch['label'].to(device)
+        # ensure they are in the correct order
+        slices = sorted(slices, key=lambda s: s.SliceLocation)
 
-        #print(f'\tdata min is {data.min()}, data max is {data.max()}')
+        if len(slices) == 0:
+            print('No slices for', img_path, '\n')
+            continue
+        if skipcount > 0:
+            print('Missing slices for', img_path, '\n\tSkipped', skipcount, 'slices.\n')
+            continue
 
-        outputs = model(data) # without converting to float: RuntimeError: Input type (torch.cuda.ShortTensor) and weight type (torch.cuda.FloatTensor) should be the same
-        
-        loss = criterion(outputs, labels)
-        #log_softmax = F.log_softmax(outputs, dim=1)
-        #loss = F.nll_loss(log_softmax, labels)
-        total_loss += loss.item() * data.size(0)
+        subjects.append(
+            tio.Subject(
+                image=tio.ScalarImage(img_path),
+                #diagnosis=dx,
+                label=label)
+            )
+    return subjects
 
-        preds = torch.argmax(outputs.data, 1)
-        total_acc += torch.sum(preds == labels).item()
-    
-        count += data.size(0)
 
-        predlist = torch.cat([predlist, preds.view(-1)])  # Append batch prediction results; for AUC
-        lbllist = torch.cat([lbllist, labels.view(-1)])
-        progress.set_description(' test loss: %.3f |  test acc: %.3f' % (total_loss / count, total_acc / count))
-
-    auroc = metric(predlist, lbllist)
-    print('\t Test | loss: %.3f, acc: %.3f, auc: %.3f' % (total_loss / count, total_acc / count, auroc.item()))
-
-    # print('\t\ttest--total_loss/count:', total_loss / count)
-    # print('\t\ttest--total_loss/len(loader):', total_loss / len(loader))
-    # print('\t\ttest--total_acc/count:', total_acc / count)
-    # print('\t\ttest--total_acc/len(loader):', total_acc / len(loader))
-    results['test_loss'] = f'{(total_loss / count):.3f}'
-    results['test_acc']=f'{(total_acc / count):.3f}'
-    results['test_auc']=f'{auroc.item():.3f}'
-
-def run_epoch(epoch, model, criterion, trainloader, testloader, optimizer, metric, device):
-    results = {}
-    # results = {'train_loss': [],
-    #             'train_acc': [],
-    #             'test_loss': [],
-    #             'test_acc': [],
-    #             'test_auc': []}
-    
+def run_epoch(model, criterion, loader, device, results, optimizer=None, metric=None):
     predlist = torch.zeros(0, dtype=torch.long).to(device)
     lbllist = torch.zeros(0, dtype=torch.long).to(device)
 
-    train(model, criterion, trainloader, optimizer, device, results)
-    test(model, criterion, testloader, metric, device, predlist, lbllist, results)
-    write_results(results, epoch)
+    count = 0
+    total_acc, total_loss = 0, 0
+    progress = tqdm(loader)
 
+    for i, batch in enumerate(progress):
+        data = batch['image'][tio.DATA].type(torch.FloatTensor).to(device)
+        labels = batch['label'].to(device)
+
+        #print(f'\tdata min is {data.min()}, data max is {data.max()}')
+
+        outputs = model(data) # without converting to float: RuntimeError: Input type (torch.cuda.ShortTensor) and weight type (torch.cuda.FloatTensor) should be the same
+        
+        loss = criterion(outputs, labels)
+        #log_softmax = F.log_softmax(outputs, dim=1)
+        #loss = F.nll_loss(log_softmax, labels)
+        total_loss += loss.item() * data.size(0)
+
+        preds = torch.argmax(outputs.data, 1)
+        total_acc += torch.sum(preds == labels).item()
+    
+        count += data.size(0)
+
+        if optimizer is not None:
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            
+            progress.set_description('train loss: %.3f | train acc: %.3f' % (total_loss / count, total_acc / count))
+        else:
+            predlist = torch.cat([predlist, preds.view(-1)])  # Append batch prediction results; for AUC
+            lbllist = torch.cat([lbllist, labels.view(-1)])
+            progress.set_description(' test loss: %.3f |  test acc: %.3f' % (total_loss / count, total_acc / count))
+
+    if optimizer is not None:
+        print('\tTrain | loss: %.3f, acc: %.3f' % (total_loss / count, total_acc / count))
+        # print('loss: %.3f | acc: %.3f' % (total_loss / count, total_acc / count))
+        # print('\t\ttrain--total_loss/count:', total_loss / count)
+        # print('\t\ttrain--total_loss/len(loader):', total_loss / len(loader))
+        # print('\t\ttrain--total_acc/count:', total_acc / count)
+        # print('\t\ttrain--total_acc/len(loader):', total_acc / len(loader))
+        results['train_loss']=f'{(total_loss / count):.3f}'
+        results['train_acc']=f'{(total_acc / count):.3f}'
+    else:
+        auroc = metric(predlist, lbllist)
+        print('\t Test | loss: %.3f, acc: %.3f, auc: %.3f' % (total_loss / count, total_acc / count, auroc.item()))
+
+        # print('\t\ttest--total_loss/count:', total_loss / count)
+        # print('\t\ttest--total_loss/len(loader):', total_loss / len(loader))
+        # print('\t\ttest--total_acc/count:', total_acc / count)
+        # print('\t\ttest--total_acc/len(loader):', total_acc / len(loader))
+        results['test_loss'] = f'{(total_loss / count):.3f}'
+        results['test_acc']=f'{(total_acc / count):.3f}'
+        results['test_auc']=f'{auroc.item():.3f}'
 
 def write_results(results, epoch):
     with open(RESULTS_FILE, 'a') as f:
         res = str(epoch)+','+','.join(results.values())
         f.write(res+'\n')
 
-# #results_out_file = 'mri_train_results_out.txt'
-# def write_to_file(out):
-#     with open(results_out_file, 'a') as rf:
-#         rf.write(out)
-
 def main():
-    if not os.path.exists(IXI_DIR):
-        print('path does not exist:', IXI_DIR)
-    if not os.path.exists(GBM_DIR):
-        print('path does not exist:', GBM_DIR)
-    assert(os.path.exists(IXI_DIR))
-    assert(os.path.exists(GBM_DIR))
-
-    assert(IXI_IMAGE_TYPE in ['T1', 'T2'])
-    assert(GBM_IMAGE_TYPE in ['T1', 'T2', 'FLAIR', 'T1GD'])
-
     torch.manual_seed(SEED)
-    gbm = get_gbm()  # 611 samples
-    ixi = get_ixi()  # 581 samples
 
-    print('Samples in UPennGBM dataset:', len(gbm))
-    print('Samples in IXI dataset:', len(ixi))
-    print()
-    print('Total samples requested:', N_SAMPLES)
-    print()
+    nc_ad_subjects = get_subjects('CN', 'AD')
+    mci_ad_subjects = get_subjects('MCI', 'AD')
+    nc_mci_subjects = get_subjects('CN', 'MCI')
 
-    n_train = int(N_SAMPLES * TRAIN_SPLIT_RATIO)
-    n_test = N_SAMPLES - n_train
+    pairwise_subjects = {'CNvAD': nc_ad_subjects, 'MCIvAD': mci_ad_subjects, 'CNvMCI': nc_mci_subjects}
 
-    from torchio.transforms import (
-        CropOrPad,
-        OneOf,
-        RescaleIntensity,
-        RandomAffine,
-        RandomElasticDeformation,
-        RandomFlip,
-        Compose,
-    )
+    for subj_pair_name, subj_pair in pairwise_subjects.items():
+        global RESULTS_FILE
+        RESULTS_FILE = f'{subj_pair_name}_train_results_{NUM_EPOCHS}-epochs_{BATCH_SIZE}-batch_size.csv'
 
-    rescale = RescaleIntensity((0.05, 99.5))
-    randaffine = tio.RandomAffine(scales=(0.9,1.2),degrees=10, isotropic=True, image_interpolation='nearest')
-    flip = tio.RandomFlip(axes=('LR'), p=0.5)
-    #pad = CropOrPad([256,256,150])
-    pad = CropOrPad([240,240,155])
-    train_transform = Compose([rescale, flip, randaffine, pad])
-    test_transform = Compose([rescale, pad])
+        print('\nStarting', subj_pair_name)
 
-    samples_per_dataset = N_SAMPLES // 2
+        N_SAMPLES = len(subj_pair)
+        n_train = int(N_SAMPLES * TRAIN_SPLIT_RATIO)
+        n_test = N_SAMPLES - n_train
 
-    print('Getting', samples_per_dataset, 'samples from each dataset\n')
+        print('Total subjects:', N_SAMPLES, '\n')
 
-    subjects_list = gbm[:samples_per_dataset] + ixi[:samples_per_dataset]
+        from torchio.transforms import (
+            CropOrPad,
+            OneOf,
+            RescaleIntensity,
+            RandomAffine,
+            RandomElasticDeformation,
+            RandomFlip,
+            Compose,
+            Resample,
+            Resize
+        )
 
-    train_subjects, test_subjects = random_split(subjects_list, [n_train, n_test], generator=torch.Generator().manual_seed(SEED))
-    trainset = tio.SubjectsDataset(train_subjects, transform=train_transform)
-    testset = tio.SubjectsDataset(test_subjects, transform=test_transform)
-
-    def count_split(dataset):
-        n_ixi, n_gbm = 0, 0
-        for subj in dataset:
-            if subj['label'] == 0:
-                n_ixi += 1
-            elif subj['label'] == 1:
-                n_gbm += 1
-            else:
-                print(subj['label'], "invalid label")
+        IMAGE_SIZE = [256, 256, 48]
+        rescale = RescaleIntensity((0.05, 99.5))
+        resample = tio.Resample(1)
         
-        print('\tIXI:', n_ixi)
-        print('\tGBM:', n_gbm)
-        print()
+        half_res = [dim // 2 for dim in IMAGE_SIZE[:2]]
+        half_res.append(IMAGE_SIZE[-1])
+        resize = tio.Resize(half_res)
 
-    print('Training set:', len(trainset), 'samples')
-    count_split(trainset)
+        randaffine = tio.RandomAffine(scales=(0.9,1.2),degrees=10, isotropic=True, image_interpolation='nearest')
+        flip = tio.RandomFlip(axes=('LR'), p=0.5)
+        pad = CropOrPad(IMAGE_SIZE) # crop/pad to most common shape
+        #train_transform = Compose([rescale, flip, randaffine, pad])
+        #test_transform = Compose([rescale, pad])
+        #train_transform = Compose([flip, randaffine, pad])
+        #test_transform = Compose([pad])
 
-    print('Testing set:', len(testset), 'samples')
-    count_split(testset)
+        train_transform = Compose([rescale, flip, randaffine, resample, resize])
+        test_transform = Compose([rescale, resample, resize])
 
-    trainloader = DataLoader(dataset=trainset, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS)
-    testloader = DataLoader(dataset=testset, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS)
+        train_subjects, test_subjects = random_split(subj_pair, [n_train, n_test], generator=torch.Generator().manual_seed(SEED))
+        trainset = tio.SubjectsDataset(train_subjects, transform=train_transform)
+        testset = tio.SubjectsDataset(test_subjects, transform=test_transform)
 
-    print('batch size:', BATCH_SIZE)
-    print('length trainloader:', len(trainloader))
-    print('length testloader:', len(testloader), '\n')
+        def count_split(dataset):
+            n_0, n_1 = 0, 0
+            for subj in dataset:
+                if subj['label'] == 0:
+                    n_0 += 1
+                elif subj['label'] == 1:
+                    n_1 += 1
+                else:
+                    print(subj['label'], "invalid label")
+            
+            name_0, name_1 = subj_pair_name.split('v')
+            print(f'\t{name_0}: {n_0}')
+            print(f'\t{name_1}: {n_1}')
+            print()
 
-    # # Visualize axial slices of one batch
-    # layer = 100
-    # batch_t1 = one_batch['t1'][tio.DATA][..., layer]
-    # batch_label = one_batch['label'][tio.DATA][:, 1:, ..., layer]
-    # slices = torch.cat((batch_mri, batch_label))
-    # image_path = 'batch_whole_images.png'
-    # torchvision.utils.save_image(
-    #     slices,
-    #     image_path,
-    #     nrow=BATCH_SIZE // 2,
-    #     normalize=True,
-    #     scale_each=True,
-    #     padding=0
-    # )
+        print('Training set:', len(trainset), 'samples')
+        count_split(trainset)
 
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        print('Testing set:', len(testset), 'samples')
+        count_split(testset)
 
-    cnn_name = 'resnet'
-    model_depth = 101 # (18|34|50|101|152|200)
-    n_classes = 2  # output classes
-    in_channels = 1 # model input channels (1|3)
-    sample_size = 240*240*155  # image size
+        trainloader = DataLoader(dataset=trainset, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS)
+        testloader = DataLoader(dataset=testset, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS)
 
-    model = generate_model.main(cnn_name, model_depth, n_classes, in_channels, sample_size).to(device)
-    #model = UNet().to(device)
-    #model.to(device)
+        print('batch size:', BATCH_SIZE)
+        print('length trainloader:', len(trainloader))
+        print('length testloader:', len(testloader), '\n')
 
-    optimizer = torch.optim.AdamW(model.parameters())#, lr=1e-3, weight_decay=1e-3)
-    criterion = nn.CrossEntropyLoss()
-    #criterion = F.nll_loss()
-    metric = BinaryAUROC().to(device)
+        # # Visualize axial slices of one batch
+        # layer = 100
+        # batch_t1 = one_batch['t1'][tio.DATA][..., layer]
+        # batch_label = one_batch['label'][tio.DATA][:, 1:, ..., layer]
+        # slices = torch.cat((batch_mri, batch_label))
+        # image_path = 'batch_whole_images.png'
+        # torchvision.utils.save_image(
+        #     slices,
+        #     image_path,
+        #     nrow=BATCH_SIZE // 2,
+        #     normalize=True,
+        #     scale_each=True,
+        #     padding=0
+        # )
+
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+        cnn_name = 'resnet'
+        model_depth = 101 # (18|34|50|101|152|200)
+        n_classes = 2  # output classes
+        in_channels = 1 # model input channels (1|3)
+        #sample_size = np.prod(IMAGE_SIZE)  # image size, i.e., h*w*d
+
+        sample_size = np.prod(half_res)  # image size, i.e., h*w*d
+        
+        model = generate_model.main(cnn_name, model_depth, n_classes, in_channels, sample_size).to(device)
+        #model = UNet().to(device)
+        #model.to(device)
+
+        optimizer = torch.optim.AdamW(model.parameters())#, lr=1e-3, weight_decay=1e-3)
+        criterion = nn.CrossEntropyLoss()
+        #criterion = F.nll_loss()
+        metric = BinaryAUROC().to(device)
 
 
-    # results = {'train_loss': [],
-    #            'train_acc': [],
-    #            'test_loss': [],
-    #            'test_acc': [],
-    #            'test_auc': []}
+        header = ['epoch','train_loss','train_acc','test_loss','test_acc','test_auc']
+        with open(RESULTS_FILE, 'w') as f:
+            f.write(','.join(header)+'\n')
 
-    header = ['epoch','train_loss','train_acc','test_loss','test_acc','test_auc']
-    with open(RESULTS_FILE, 'w') as f:
-        f.write(','.join(header)+'\n')
+        for epoch in range(NUM_EPOCHS):
+            results = {}
 
-    for epoch in range(NUM_EPOCHS):
-        print('epoch %d:' % epoch)
-        run_epoch(epoch, model, criterion, trainloader, testloader, optimizer, metric, device)
-    #print(results_out)
-    #write_to_file(results_out)
-    #torch.save(model.state_dict(), f'{}.pth')
+            print('epoch %d:' % epoch)
+            run_epoch(model, criterion, trainloader, device, results, optimizer=optimizer)
+            run_epoch(model, criterion, testloader, device, results, metric=metric)
+
+            write_results(results, epoch)
+
+        print('----------------------------------\n')
 
 
 if __name__ == '__main__':
