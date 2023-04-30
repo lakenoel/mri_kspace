@@ -1,34 +1,144 @@
+#import torchvision
+import glob
+import logging
 import os
-import pandas as pd
-import torchio as tio
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader, random_split
 import sys
+import pydicom
+import numpy as np
+import pandas as pd
+import pytorch_lightning as pl
+from torchmetrics.classification import AUROC
+from torchmetrics import Accuracy
+import torch
+from torch import nn
+from torch.utils.data import DataLoader, random_split
+import torchio as tio
 sys.path.append('../../3D_CNN_PyTorch')
 import generate_model
+
+#from torch.utils.tensorboard import SummaryWriter
+#writer = SummaryWriter('lightning_logs/mri')
 #import convert_kspace
-from torchmetrics.classification import BinaryAUROC
-#from torchmetrics import AUROC
-from tqdm import tqdm
-import pydicom
-import glob
-import numpy as np
+#from torchmetrics.classification import BinaryAUROC
 
 TRAIN_SPLIT_RATIO = 0.8
 NUM_WORKERS = 4
-BATCH_SIZE = 4
+BATCH_SIZE = 8 
 SEED = 42
-NUM_EPOCHS = 50
-RESULTS_FILE = f'CNvAD_train_results_{NUM_EPOCHS}-epochs_{BATCH_SIZE}-batch-size.csv'
-
+NUM_EPOCHS = 20
+RESULTS_FILE = f'ADNI_multiclass_train_results_{NUM_EPOCHS}-epochs_{BATCH_SIZE}-batch-size_pl.csv'  # pl = pytorch_lightning
 BASE_DIR = './data'
 
-nc_mci_ad_csv = os.path.join(BASE_DIR, 'CSV', 'NCvMCIvAD.csv')
-nc_mci_ad_df = pd.read_csv(nc_mci_ad_csv)
-nc_mci_ad_df = nc_mci_ad_df.drop_duplicates()
+class MRImageClassifier(pl.LightningModule):
+    def __init__(self, cnn_name, model_depth, n_classes, in_channels, sample_size):
+        super().__init__()
+        self.n_classes = n_classes
+        self.model = generate_model.main(cnn_name, model_depth, n_classes, in_channels, sample_size)
+        self.auroc = AUROC(task='multiclass', num_classes=n_classes)
+        self.accuracy = Accuracy(task='multiclass', num_classes=n_classes)
+        self.report_f = open(RESULTS_FILE, 'w')
+        self.report_f.write('epoch,train_loss,train_acc,test_loss,test_acc,test_auc\n')
+        self.loss_fn = nn.CrossEntropyLoss()
 
+
+    def forward(self, x):
+        return self.model(x)
+
+
+    def on_validation_epoch_start(self):
+        self.val_labels = []
+        self.val_scores = []
+  
+
+    def step_impl(self, batch, prefix):
+        image = batch['image']['data']
+        label = batch['label']
+        y_pred = self.model(image)
+        loss = self.loss_fn(y_pred, label)
+        acc = self.accuracy(y_pred.data, label)
+    
+        # AUROC
+        y_prob = torch.softmax(y_pred.data, dim=1)#[:, 1]
+        metric = AUROC(task='multiclass', num_classes=self.n_classes)
+        #auroc = metric(label, y_prob)
+
+        auroc = metric(y_prob, label)
+
+        #self.log('val_auroc', auroc)
+        #print('calculated batch size:', image.shape[0]) # == BATCH_SIZE
+        self.log('%s_acc' % prefix, acc, batch_size=image.shape[0], on_step=False, on_epoch=True)
+        self.log("%s_loss" % prefix, loss, batch_size=image.shape[0], on_step=False, on_epoch=True)
+
+        return loss, label, y_prob#[:, 1]
+
+
+    def training_step(self, batch, batch_idx):
+        loss, _, _ = self.step_impl(batch, 'train')
+        #self.train_labels.append(label)
+        #self.train_scores.append(score.view(-1))
+        #x, y = batch
+        #y_pred = self(x)
+        #loss = self.loss_fn(y_pred, y)
+        #self.log('train_loss', loss)
+        return loss
+    
+
+    def validation_step(self, batch, batch_idx):
+        loss, label, score = self.step_impl(batch, 'val')
+        self.val_labels.append(label)
+        self.val_scores.append(score)
+        # x, y = batch
+        # y_pred = self.model(x)
+        # loss = self.loss_fn(y_pred, y)
+        # self.log('val_loss', loss)
+
+        # # AUROC
+        # y_prob = torch.softmax(y_pred.data, dim=1)[:, 1]
+        # y_true =y.data
+        # metric = AUROC(task='multiclass', num_classes=n_classes)
+        # auroc = metric(y_true, y_prob)
+        # self.log('val_auroc', auroc)
+        return loss
+    
+
+    def on_train_epoch_end(self):
+        labels = torch.cat(self.val_labels)
+        scores = torch.cat(self.val_scores)
+        auc = self.auroc(scores, labels)
+        self.log('auc', auc)
+
+        epoch = self.trainer.current_epoch
+        metrics = self.trainer.callback_metrics
+        logging.info('%03d: train_loss: %.3f train_acc: %.3f val_loss: %.3f val_acc: %.3f auc: %.3f' % (
+            epoch, metrics['train_loss'], metrics['train_acc'], metrics['val_loss'], metrics['val_acc'], auc))
+        if self.report_f is not None:
+            self.report_f.write('%d,%g,%g,%g,%g,%g\n' % (
+                epoch,
+                metrics['train_loss'],
+                metrics['train_acc'],
+                metrics['val_loss'],
+                metrics['val_acc'],
+                auc)
+            )
+
+
+    def configure_optimizers(self):
+        return torch.optim.AdamW(self.parameters())#, lr=1e-3, weight_decay=1e-3)
+
+
+    # def train_dataloader(self):
+    #     transform = []
+    #     trainset = MRImageDataset(data_path=os.path.join(BASE_DIR, 'MRI'), transform=transform)
+    #     trainloader = DataLoader(dataset=trainset, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS)
+
+    #     return trainloader    
+
+    # def val_dataloader(self):
+    #     transform = []
+    #     testset = MRImageDataset(data_path=os.path.join(BASE_DIR, 'MRI'), transform=transform)
+    #     testloader = DataLoader(dataset=testset, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS)
+
+    #     return testloader
 
 def set_loc(df):
     def get_loc(row):
@@ -37,34 +147,73 @@ def set_loc(df):
     location = df.apply(get_loc, axis=1)
     df['loc'] = location
 
-set_loc(nc_mci_ad_df)
+
+def get_patient_image_locs():
+    DIG_LEN = 4
+    for row, _ in patient_df.iterrows():
+        if row % 10 == 0:
+            num_digs = int(np.log10(row)+1)
+        else:
+            num_digs = int(np.ceil(np.log10(row)))
+        #num_digs = int(np.log10(1000 % row))
+        num_zeroes = DIG_LEN - num_digs  # num zeroes to pad with
+        if num_zeroes < 0:
+            num_zeroes = 1
+
+        match_pattern = r'\d+_S_[0]{%d}%d'%(num_zeroes, row)
+        matches = nc_mci_ad_df['PTID'].str.match(match_pattern)
+        if matches is not None:
+            if (len(nc_mci_ad_df[matches]['loc']) > 1):
+                break
+            patient_df.loc[row, 'image'] = nc_mci_ad_df[matches].iloc[0]['loc']
 
 
-def get_subjects(dx_0, dx_1):
-    assert dx_0 in ('CN', 'MCI')
-    assert dx_1 in ('MCI', 'AD')
+def drop_bad_scans():
+    print('Dropping bad scans...')
+    bad_scans = ['006_S_1130', '068_S_0476', '068_S_0127', '068_S_0109', '100_S_0047', '068_S_0210']
+
+    bad_indices = []
+    for scan in bad_scans:
+        index_val = patient_df[patient_df['image'].str.contains(scan)].index
+        try:
+            bad_indices.append(index_val.item())
+        except:
+            print(f'index is {index_val}. Skipping')
+            continue
+    
+    patient_df.drop(bad_indices, inplace=True)
+
+
+def get_subjects():
+    # 1 = Normal Control
+    # 2 = Mild Cognitive Impairment
+    # 3 = Alzheimers Disease
+
+    ## drop some mci samples to balance classes
+    #mci_samples = self.patient_df[self.patient_df.DX_bl == 2]
+    #patient_df.drop(mci_samples.sample(n=60, axis=0, random_state=SEED).index, inplace=True)#.reset_index()
 
     subjects = []
 
-    for _, row in nc_mci_ad_df.iterrows():
-        if dx_0 == 'CN' and dx_1 == 'MCI':
-            dx = dx_0 if row.DX_bl == 0 else dx_1
-        elif dx_0 == 'CN' and dx_1 == 'AD':
-            dx = dx_0 if row.DX_bl == 0 else dx_1
-        elif dx_0 == 'MCI' and dx_1 == 'AD':
-            dx = dx_0 if row.DX_bl == 1 else dx_1
-        label = 0 if dx == dx_0 else 1
+    for _, row in patient_df.iterrows():
+        assert(row.DX_bl in (1, 2, 3))
+        if row.DX_bl == 1:
+            dx = 'CN'
+        elif row.DX_bl == 2:
+            dx = 'MCI'
+        elif row.DX_bl == 3:
+            dx = 'AD'
 
-        img_path = os.path.join(row['loc'], 't2')
+        img_path = os.path.join(row['image'], 't2')
 
-        # skip files with no SliceLocation (eg scout views)
+        # skip files with no SliceLocation (eg scout views))
         slices = []
         skipcount = 0
 
         files = []
         for fname in glob.glob(os.path.join(img_path, '*'), recursive=False):
         #     #print("loading: {}".format(fname))
-             files.append(pydicom.dcmread(fname))
+            files.append(pydicom.dcmread(fname))
 
         for f in files:
             if hasattr(f, 'SliceLocation'):
@@ -87,209 +236,148 @@ def get_subjects(dx_0, dx_1):
         subjects.append(
             tio.Subject(
                 image=tio.ScalarImage(img_path),
-                #diagnosis=dx,
-                label=label)
+                diagnosis=dx,
+                label=int(row.DX_bl-1))
             )
     return subjects
 
+    # def __getitem__(self, index):
+    #     subject = self.subjects[index]
+    #     image = subject['image']
+    #     if self.transform:
+    #         image = self.transform(image)
+    #     return image.data, torch.tensor(subject['label'])
 
-def run_epoch(model, criterion, loader, device, results, optimizer=None, metric=None):
-    predlist = torch.zeros(0, dtype=torch.long).to(device)
-    lbllist = torch.zeros(0, dtype=torch.long).to(device)
+    # def __len__(self):
+    #     return len(self.subjects)
 
-    count = 0
-    total_acc, total_loss = 0, 0
-    progress = tqdm(loader)
 
-    for i, batch in enumerate(progress):
-        data = batch['image'][tio.DATA].type(torch.FloatTensor).to(device)
-        labels = batch['label'].to(device)
-
-        #print(f'\tdata min is {data.min()}, data max is {data.max()}')
-
-        outputs = model(data) # without converting to float: RuntimeError: Input type (torch.cuda.ShortTensor) and weight type (torch.cuda.FloatTensor) should be the same
+def show_counts(trainset, testset, trainloader=None, testloader=None):
+    def count_split(dataset):
+        n_0, n_1, n_2 = 0, 0, 0
+        for subj in dataset:
+            if subj['label'] == 0:
+                n_0 += 1
+            elif subj['label'] == 1:
+                n_1 += 1
+            elif subj['label'] == 2:
+                n_2 += 1
+            else:
+                print(subj['label'], "invalid label")
         
-        loss = criterion(outputs, labels)
-        #log_softmax = F.log_softmax(outputs, dim=1)
-        #loss = F.nll_loss(log_softmax, labels)
-        total_loss += loss.item() * data.size(0)
+        print(f'\tCN: {n_0}')
+        print(f'\tMCI: {n_1}')
+        print(f'\tAD: {n_2}')
+        print()
 
-        preds = torch.argmax(outputs.data, 1)
-        total_acc += torch.sum(preds == labels).item()
-    
-        count += data.size(0)
+    print('Training set:', len(trainset), 'samples')
+    count_split(trainset)
 
-        if optimizer is not None:
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            
-            progress.set_description('train loss: %.3f | train acc: %.3f' % (total_loss / count, total_acc / count))
-        else:
-            predlist = torch.cat([predlist, preds.view(-1)])  # Append batch prediction results; for AUC
-            lbllist = torch.cat([lbllist, labels.view(-1)])
-            progress.set_description(' test loss: %.3f |  test acc: %.3f' % (total_loss / count, total_acc / count))
+    print('\nTesting set:', len(testset), 'samples')
+    count_split(testset)
 
-    if optimizer is not None:
-        print('\tTrain | loss: %.3f, acc: %.3f' % (total_loss / count, total_acc / count))
-        # print('loss: %.3f | acc: %.3f' % (total_loss / count, total_acc / count))
-        # print('\t\ttrain--total_loss/count:', total_loss / count)
-        # print('\t\ttrain--total_loss/len(loader):', total_loss / len(loader))
-        # print('\t\ttrain--total_acc/count:', total_acc / count)
-        # print('\t\ttrain--total_acc/len(loader):', total_acc / len(loader))
-        results['train_loss']=f'{(total_loss / count):.3f}'
-        results['train_acc']=f'{(total_acc / count):.3f}'
-    else:
-        auroc = metric(predlist, lbllist)
-        print('\t Test | loss: %.3f, acc: %.3f, auc: %.3f' % (total_loss / count, total_acc / count, auroc.item()))
+    print('\nbatch size:', BATCH_SIZE)
+    print('length trainloader:', len(trainloader))
+    print('length testloader:', len(testloader), '\n')
 
-        # print('\t\ttest--total_loss/count:', total_loss / count)
-        # print('\t\ttest--total_loss/len(loader):', total_loss / len(loader))
-        # print('\t\ttest--total_acc/count:', total_acc / count)
-        # print('\t\ttest--total_acc/len(loader):', total_acc / len(loader))
-        results['test_loss'] = f'{(total_loss / count):.3f}'
-        results['test_acc']=f'{(total_acc / count):.3f}'
-        results['test_auc']=f'{auroc.item():.3f}'
 
-def write_results(results, epoch):
-    with open(RESULTS_FILE, 'a') as f:
-        res = str(epoch)+','+','.join(results.values())
-        f.write(res+'\n')
+nc_mci_ad_csv = os.path.join(BASE_DIR, 'CSV', 'NCvMCIvAD.csv')
+nc_mci_ad_df = pd.read_csv(nc_mci_ad_csv)
+nc_mci_ad_df = nc_mci_ad_df.drop_duplicates()
+
+#mci_samples = self.nc_mci_ad_df[nc_mci_ad_df.DX_bl == 1]
+#nc_mci_ad_df.drop(self.mci_samples.sample(n=60, axis=0, random_state=SEED).index, inplace=True)
+
+# TODO: compare DX_bl to DX_latest
+patient_csv = os.path.join(BASE_DIR, 'patient_index_and_fold_mapping.csv')
+patient_df = pd.read_csv(patient_csv, index_col='RID')
 
 def main():
-    torch.manual_seed(SEED)
+    #print('pl version:', pl.__version__)  # 2.0.2
 
-    nc_ad_subjects = get_subjects('CN', 'AD')
-    mci_ad_subjects = get_subjects('MCI', 'AD')
-    nc_mci_subjects = get_subjects('CN', 'MCI')
+    set_loc(nc_mci_ad_df)
+    get_patient_image_locs()
+    drop_bad_scans()
 
-    pairwise_subjects = {'CNvAD': nc_ad_subjects, 'MCIvAD': mci_ad_subjects, 'CNvMCI': nc_mci_subjects}
+    subjects = get_subjects()
 
-    for subj_pair_name, subj_pair in pairwise_subjects.items():
-        global RESULTS_FILE
-        RESULTS_FILE = f'{subj_pair_name}_train_results_{NUM_EPOCHS}-epochs_{BATCH_SIZE}-batch_size.csv'
+    n_samples = len(subjects)
+    n_train = int(n_samples * TRAIN_SPLIT_RATIO)
+    n_test = n_samples - n_train
 
-        print('\nStarting', subj_pair_name)
+    (train_subjects,
+     test_subjects) = random_split(
+                        subjects,
+                        [n_train, n_test],
+                        generator=torch.Generator().manual_seed(SEED))
 
-        N_SAMPLES = len(subj_pair)
-        n_train = int(N_SAMPLES * TRAIN_SPLIT_RATIO)
-        n_test = N_SAMPLES - n_train
+    #test_subjects = torch.utils.data.Subset(list(train_subjects), [i for i in range(n_train)])
+    #if not set(subj['image']['path'] for subj in list(test_subjects)).issubset(set(subj['image']['path'] for subj in list(train_subjects))):
+    #    sys.exit()
+    # print('len train:', len(train_subjects))
+    # print('len test:', len(test_subjects))
+    # print(next(iter(train_subjects)))
+    # print('train paths == test paths:', set([subj['image']['path'] for subj in list(train_subjects)]) == set([subj['image']['path'] for subj in list(test_subjects)]))
+    # sys.exit()
+    # Transforms
+    IMAGE_SIZE = [256, 256, 48]
+    rescale = tio.RescaleIntensity((0.05, 99.5))
+    #resample = tio.Resample(1)
+    
+    half_res = [dim // 2 for dim in IMAGE_SIZE[:2]]
+    half_res.append(IMAGE_SIZE[-1])
+    resize = tio.Resize(half_res)
 
-        print('Total subjects:', N_SAMPLES, '\n')
+    randaffine = tio.RandomAffine(scales=(0.9,1.2),degrees=10, isotropic=True, image_interpolation='nearest')
+    flip = tio.RandomFlip(axes=('LR'), p=0.5)
+    pad = tio.CropOrPad(IMAGE_SIZE) # crop/pad to most common shape
 
-        from torchio.transforms import (
-            CropOrPad,
-            OneOf,
-            RescaleIntensity,
-            RandomAffine,
-            RandomElasticDeformation,
-            RandomFlip,
-            Compose,
-            Resample,
-            Resize
-        )
+    train_transform = tio.Compose([resize, rescale, flip, randaffine])
+    trainset = tio.SubjectsDataset(train_subjects, transform=train_transform)
+    
+    test_transform = tio.Compose([resize, rescale])
+    testset = tio.SubjectsDataset(test_subjects, transform=test_transform)
 
-        IMAGE_SIZE = [256, 256, 48]
-        rescale = RescaleIntensity((0.05, 99.5))
-        resample = tio.Resample(1)
-        
-        half_res = [dim // 2 for dim in IMAGE_SIZE[:2]]
-        half_res.append(IMAGE_SIZE[-1])
-        resize = tio.Resize(half_res)
+    trainloader = DataLoader(dataset=trainset, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS)
+    testloader = DataLoader(dataset=testset, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS)
 
-        randaffine = tio.RandomAffine(scales=(0.9,1.2),degrees=10, isotropic=True, image_interpolation='nearest')
-        flip = tio.RandomFlip(axes=('LR'), p=0.5)
-        pad = CropOrPad(IMAGE_SIZE) # crop/pad to most common shape
-        #train_transform = Compose([rescale, flip, randaffine, pad])
-        #test_transform = Compose([rescale, pad])
-        #train_transform = Compose([flip, randaffine, pad])
-        #test_transform = Compose([pad])
+    # examples = iter(testloader)
+    # example_data = next(iter(testloader))#, example_targets = next(examples)
+    # print(example_data['image'])
+    # img_grid = torchvision.utils.make_grid(example_data['image'][tio.DATA][..., example_data['image'][tio.DATA].shape[-1]//2])
+    # writer.add_image('mri images', img_grid)
+    # writer.close()
+    # sys.exit()
+    
 
-        train_transform = Compose([rescale, flip, randaffine, resample, resize])
-        test_transform = Compose([rescale, resample, resize])
-
-        train_subjects, test_subjects = random_split(subj_pair, [n_train, n_test], generator=torch.Generator().manual_seed(SEED))
-        trainset = tio.SubjectsDataset(train_subjects, transform=train_transform)
-        testset = tio.SubjectsDataset(test_subjects, transform=test_transform)
-
-        def count_split(dataset):
-            n_0, n_1 = 0, 0
-            for subj in dataset:
-                if subj['label'] == 0:
-                    n_0 += 1
-                elif subj['label'] == 1:
-                    n_1 += 1
-                else:
-                    print(subj['label'], "invalid label")
-            
-            name_0, name_1 = subj_pair_name.split('v')
-            print(f'\t{name_0}: {n_0}')
-            print(f'\t{name_1}: {n_1}')
-            print()
-
-        print('Training set:', len(trainset), 'samples')
-        count_split(trainset)
-
-        print('Testing set:', len(testset), 'samples')
-        count_split(testset)
-
-        trainloader = DataLoader(dataset=trainset, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS)
-        testloader = DataLoader(dataset=testset, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS)
-
-        print('batch size:', BATCH_SIZE)
-        print('length trainloader:', len(trainloader))
-        print('length testloader:', len(testloader), '\n')
-
-        # # Visualize axial slices of one batch
-        # layer = 100
-        # batch_t1 = one_batch['t1'][tio.DATA][..., layer]
-        # batch_label = one_batch['label'][tio.DATA][:, 1:, ..., layer]
-        # slices = torch.cat((batch_mri, batch_label))
-        # image_path = 'batch_whole_images.png'
-        # torchvision.utils.save_image(
-        #     slices,
-        #     image_path,
-        #     nrow=BATCH_SIZE // 2,
-        #     normalize=True,
-        #     scale_each=True,
-        #     padding=0
-        # )
-
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
-        cnn_name = 'resnet'
-        model_depth = 101 # (18|34|50|101|152|200)
-        n_classes = 2  # output classes
-        in_channels = 1 # model input channels (1|3)
-        #sample_size = np.prod(IMAGE_SIZE)  # image size, i.e., h*w*d
-
-        sample_size = np.prod(half_res)  # image size, i.e., h*w*d
-        
-        model = generate_model.main(cnn_name, model_depth, n_classes, in_channels, sample_size).to(device)
-        #model = UNet().to(device)
-        #model.to(device)
-
-        optimizer = torch.optim.AdamW(model.parameters())#, lr=1e-3, weight_decay=1e-3)
-        criterion = nn.CrossEntropyLoss()
-        #criterion = F.nll_loss()
-        metric = BinaryAUROC().to(device)
+    show_counts(trainset, testset, trainloader, testloader)
 
 
-        header = ['epoch','train_loss','train_acc','test_loss','test_acc','test_auc']
-        with open(RESULTS_FILE, 'w') as f:
-            f.write(','.join(header)+'\n')
+    LOG_FMT = "[%(levelno)d] %(message)s"
+    logging.basicConfig(level=logging.INFO, format=LOG_FMT)
+    
 
-        for epoch in range(NUM_EPOCHS):
-            results = {}
-
-            print('epoch %d:' % epoch)
-            run_epoch(model, criterion, trainloader, device, results, optimizer=optimizer)
-            run_epoch(model, criterion, testloader, device, results, metric=metric)
-
-            write_results(results, epoch)
-
-        print('----------------------------------\n')
-
-
+    #sample_size = np.prod(IMAGE_SIZE)  # image size, i.e., h*w*d
+    sample_size = np.prod(half_res)  # image size, i.e., h*w*d
+    model = MRImageClassifier(cnn_name='resnet',
+                              model_depth=18,
+                              n_classes=3,
+                              in_channels=1,
+                              sample_size=sample_size)
+    
+    ck = pl.callbacks.ModelCheckpoint(dirpath="models", save_top_k=1, monitor="val_loss")
+    #trainer = pl.Trainer(callbacks=[ck], gpus=1, enable_progress_bar = True, max_epochs=NUM_EPOCHS)
+    #trainer = pl.Trainer(max_epochs=NUM_EPOCHS,)
+                #callbacks=[ck], enable_progress_bar=True)
+    
+    trainer = pl.Trainer(
+        #logger=logger,
+        callbacks=[ck],
+        max_epochs=NUM_EPOCHS,
+        #gpus=1,
+        #progress_bar_refresh_rate=30
+    )
+    trainer.fit(model, trainloader, testloader)
+    
 if __name__ == '__main__':
-   main()
+    main()
