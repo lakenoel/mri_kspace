@@ -119,8 +119,7 @@ def get_subjects():
             dx = 'AD'
             label = 1
 
-        # img_path = os.path.join(row['image'], 't2')
-        img_path = os.path.join(row['image'], 'pd')
+        img_path = os.path.join(row['image'], 't2')
 
         # skip files with no SliceLocation (eg scout views)
         slices = []
@@ -547,7 +546,7 @@ def main():
     elif REDUCED_KSPACE:
         RESULTS_FILE = f'_train_results_ADvNC_{REDUCED_PERCENTAGE}prcnt-reduced-kspace_results_{NUM_FOLDS}-folds_{EPOCHS}-epochs_{BATCH_SIZE}-batch_size.csv'
     elif MRI:
-        RESULTS_FILE = f'_train_results_ADvNC_pd_same-trans-half-res_{NUM_FOLDS}-folds_{EPOCHS}-epochs_{BATCH_SIZE}-batch_size.csv'
+        RESULTS_FILE = f'_train_results_ADvNC_{NUM_FOLDS}-folds_{EPOCHS}-epochs_{BATCH_SIZE}-batch_size.csv'
 
     #header = ['fold','epoch','train_loss','train_acc','train_auc','test_loss','test_acc','test_auc']
     with open(RESULTS_FILE, 'w') as f:
